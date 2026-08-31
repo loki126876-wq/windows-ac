@@ -1,0 +1,46 @@
+name: Windows Web Desktop (Cloudflare)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  launch-windows:
+    runs-on: windows-latest
+    timeout-minutes: 360 # حداکثر زمان مجاز رانر (۶ ساعت)
+
+    steps:
+      - name: 1. Setup VNC Server & Dependencies
+        shell: powershell
+        run: |
+          Write-Host "--- در حال نصب TightVNC و پیش‌نیازها ---" -ForegroundColor Cyan
+          choco install tightvnc -y --no-progress
+
+          # غیرفعال‌سازی نیاز به پسورد برای اتصال آنی و سریع از وب
+          New-Item -Path "HKLM:\SOFTWARE\TightVNC\Server" -Force | Out-Null
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\TightVNC\Server" -Name "AcceptRfbConnections" -Value 1 -Type DWord
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\TightVNC\Server" -Name "AllowLoopback" -Value 1 -Type DWord
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\TightVNC\Server" -Name "UseVncAuthentication" -Value 0 -Type DWord
+
+          # استارت سرویس VNC
+          Start-Process "C:\Program Files\TightVNC\tvnserver.exe" -ArgumentList "-start"
+
+          # دانلود noVNC و نصب websockify
+          git clone --depth 1 https://github.com/novnc/noVNC.git C:\noVNC
+          pip install websockify
+
+          # دانلود Cloudflared
+          Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe"
+
+      - name: 2. Start Web Bridge & Cloudflare Tunnel
+        shell: powershell
+        run: |
+          # اجرای Web-bridge به صورت پروسه پس‌زمینه
+          Start-Process powershell -ArgumentList "-NoExit", "-Command", "websockify --web C:\noVNC 8080 localhost:5900"
+
+          Write-Host "==========================================================" -ForegroundColor Green
+          Write-Host " سرور آماده است! در لاگ‌های زیر به دنبال لینک trycloudflare بگردید " -ForegroundColor Yellow
+          Write-Host " فرمت ورود: https://xxxx.trycloudflare.com/vnc.html?autoconnect=true " -ForegroundColor Yellow
+          Write-Host "==========================================================" -ForegroundColor Green
+
+          # استارت تانل کلودفلر و زنده نگه‌داشتن ورک‌فلو
+          .\cloudflared.exe tunnel --url http://localhost:8080
