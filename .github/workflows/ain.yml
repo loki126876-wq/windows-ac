@@ -1,0 +1,200 @@
+name: Windows Web Desktop (Telegram & Auto-Healing)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  launch-windows:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: 1. Setup Environment & Dependencies
+        shell: powershell
+        run: |
+          Write-Host "Configuring System & Display..." -ForegroundColor Cyan
+
+          # بهینه‌سازی سیستم و ابعاد تصویر
+          Set-DisplayResolution -Width 1280 -Height 720 -Force -ErrorAction SilentlyContinue
+          powercfg /s 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+
+          # خاموش کردن انیمیشن‌های سنگین ویندوز برای پینگ بهتر
+          Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name 'UserPreferencesMask' -Value ([byte[]](0x90,0x12,0x03,0x80,0x10,0x00,0x00,0x00))
+          Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop\WindowMetrics' -Name 'MinAnimate' -Value 0
+
+          # نصب TightVNC
+          choco install tightvnc -y --no-progress
+          Stop-Service tvnserver -ErrorAction SilentlyContinue
+
+          # تنظیمات رجیستری برای اتصال پایدار و دائمی
+          $vncPaths = @("HKLM:\SOFTWARE\TightVNC\Server", "HKCU:\Software\TightVNC\Server")
+          foreach ($path in $vncPaths) {
+              if (-not (Test-Path $path)) { New-Item -Path $path -Force | Out-Null }
+              Set-ItemProperty -Path $path -Name "AcceptRfbConnections" -Value 1 -Type DWord
+              Set-ItemProperty -Path $path -Name "AllowLoopback" -Value 1 -Type DWord
+              Set-ItemProperty -Path $path -Name "LoopbackOnly" -Value 0 -Type DWord
+              Set-ItemProperty -Path $path -Name "UseVncAuthentication" -Value 0 -Type DWord
+              Set-ItemProperty -Path $path -Name "AlwaysShared" -Value 1 -Type DWord
+              Set-ItemProperty -Path $path -Name "DisconnectAction" -Value 0 -Type DWord
+              Set-ItemProperty -Path $path -Name "RemoveWallpaper" -Value 0 -Type DWord
+              Set-ItemProperty -Path $path -Name "PollFullScreen" -Value 1 -Type DWord
+          }
+
+          Start-Service tvnserver
+
+          # نصب noVNC، websockify و پکیج‌های پایتون
+          git clone --depth 1 https://github.com/novnc/noVNC.git C:\noVNC
+          pip install websockify requests psutil
+
+          # تزریق اسکریپت نمایشگر پینگ آنلاین به صفحه noVNC
+          $hudScript = @"
+          <div id='pingHUD' style='position:fixed;top:10px;right:10px;background:rgba(0,0,0,0.75);color:#00ff66;font-family:monospace;padding:6px 12px;border-radius:6px;font-size:13px;z-index:9999;border:1px solid #00ff66;pointer-events:none;'>Ping: Measuring...</div>
+          <script>
+            setInterval(function(){
+              var start = Date.now();
+              fetch('/ping_check', {cache: 'no-store'}).then(function(){
+                var rtt = Date.now() - start;
+                var el = document.getElementById('pingHUD');
+                if(el){
+                  el.innerText = '⚡ Ping: ' + rtt + ' ms | Turbo Mode';
+                  el.style.color = rtt < 120 ? '#00ff66' : (rtt < 250 ? '#ffcc00' : '#ff4444');
+                }
+              }).catch(function(){});
+            }, 2000);
+          </script>
+          "@
+          Add-Content -Path "C:\noVNC\vnc.html" -Value $hudScript
+
+          # دانلود Cloudflared
+          Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe"
+
+      - name: 2. Launch Telegram Bot Orchestrator & Auto-Healer
+        shell: powershell
+        run: |
+          # ساخت اسکریپت پایتون مدیریت سرور و ربات تلگرام
+          $pythonScript = @'
+          import subprocess
+          import time
+          import re
+          import os
+          import threading
+          import requests
+          import psutil
+
+          BOT_TOKEN = "8608061868:AAHEEsZPOw8vq100WyyusF3QjTlBvTq9-Iw"
+          ADMIN_ID = 7963634461
+          BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
+          tunnel_process = None
+          current_url = ""
+          last_update_id = 0
+
+          def send_telegram(text):
+              try:
+                  url = f"{BASE_URL}/sendMessage"
+                  payload = {"chat_id": ADMIN_ID, "text": text, "parse_mode": "HTML"}
+                  requests.post(url, json=payload, timeout=10)
+              except Exception as e:
+                  print("Telegram send error:", e)
+
+          def start_websockify():
+              subprocess.Popen(["python", "-m", "websockify", "--web", "C:\\noVNC", "--heartbeat", "15", "8080", "127.0.0.1:5900"],
+                               stdout=subprocess.DEVNULL, credentials=None)
+
+          def start_cloudflared():
+              global tunnel_process, current_url
+              if tunnel_process:
+                  try:
+                      tunnel_process.kill()
+                  except:
+                      pass
+
+              tunnel_process = subprocess.Popen(["cloudflared.exe", "tunnel", "--url", "http://127.0.0.1:8080", "--no-autoupdate"],
+                                                stdout=subprocess.PIPE, credentials=None, stderr=subprocess.STDOUT, text=True, bufsize=1)
+
+              for line in iter(tunnel_process.stdout.readline, ''):
+                  match = re.search(r'https://[a-zA-Z0-9-]+\.trycloudflare\.com', line)
+                  if match:
+                      raw_url = match.group(0)
+                      current_url = f"{raw_url}/vnc.html?autoconnect=true&reconnect=true&quality=4&compression=6&resize=scale"
+                      print("Found Tunnel URL:", current_url)
+                      msg = (
+                          "🚀 <b>Windows Web Desktop is Online!</b>\n\n"
+                          f"🔗 <b>Access Link (Ultra Low Latency):</b>\n{current_url}\n\n"
+                          "⚙️ <b>Server Specs:</b>\n"
+                          f"• CPU Cores: {os.cpu_count()}\n"
+                          f"• Total RAM: {round(psutil.virtual_memory().total / (1024**3), 1)} GB\n"
+                          f"• OS: Windows Server (GitHub Actions)\n\n"
+                          "🎮 <b>Bot Commands:</b>\n"
+                          "/link - دریافت مجدد لینک\n"
+                          "/status - وضعیت رم، سی‌پی‌یو و پایداری\n"
+                          "/newlink - ساخت و دریافت لینک کلودفلر جدید\n"
+                          "/restart_vnc - ریست سرویس گرافیکی VNC"
+                      )
+                      send_telegram(msg)
+                      break
+
+          def telegram_listener():
+              global last_update_id, current_url
+              while True:
+                  try:
+                      url = f"{BASE_URL}/getUpdates?offset={last_update_id + 1}&timeout=20"
+                      resp = requests.get(url, timeout=25).json()
+                      if "result" in resp:
+                          for update in resp["result"]:
+                              last_update_id = update["update_id"]
+                              if "message" in update and "text" in update["message"]:
+                                  chat_id = update["message"]["chat"]["id"]
+                                  if chat_id != ADMIN_ID:
+                                      continue
+                                  text = update["message"]["text"].strip().lower()
+
+                                  if text in ["/start", "/link"]:
+                                      send_telegram(f"🔗 <b>لینک ورود به ویندوز:</b>\n{current_url}")
+                                  elif text == "/status":
+                                      ram = psutil.virtual_memory()
+                                      cpu = psutil.cpu_percent(interval=0.5)
+                                      stat_msg = (
+                                          "📊 <b>وضعیت زنده سرور:</b>\n\n"
+                                          f"⚡ مصرف پردازنده: {cpu}%\n"
+                                          f"🧠 مصرف رم: {ram.percent}% ({round(ram.used/(1024**3),1)}/{round(ram.total/(1024**3),1)} GB)\n"
+                                          f"🟢 تانل فعال: {'بله' if current_url else 'خیر'}\n"
+                                          f"⏱ وضعیت اتصال: پایدار و ایزوله"
+                                      )
+                                      send_telegram(stat_msg)
+                                  elif text == "/newlink":
+                                      send_telegram("🔄 در حال ساخت ساب‌دامین و لینک جدید کلودفلر...")
+                                      threading.Thread(target=start_cloudflared).start()
+                                  elif text == "/restart_vnc":
+                                      send_telegram("🔄 در حال راه‌اندازی مجدد سرویس VNC...")
+                                      subprocess.run(["powershell", "-Command", "Restart-Service tvnserver"])
+                                      start_websockify()
+                                      send_telegram("✅ سرویس گرافیکی ریستارت شد.")
+                  except Exception as e:
+                      time.sleep(2)
+
+          def watchdog():
+              global tunnel_process
+              while True:
+                  time.sleep(15)
+                  try:
+                      # بررسی سلامت پورت لوکال وب‌ساکیفای
+                      requests.get("http://127.0.0.1:8080/vnc.html", timeout=3)
+                  except:
+                      print("Websockify down, restarting...")
+                      start_websockify()
+
+                  # بررسی فعال بودن پروسه کلودفلر
+                  if tunnel_process and tunnel_process.poll() is not None:
+                      print("Tunnel died! Auto-healing in progress...")
+                      send_telegram("⚠️ ارتباط تانل قطع شده بود. در حال ساخت خودکار لینک جدید...")
+                      threading.Thread(target=start_cloudflared).start()
+
+          start_websockify()
+          threading.Thread(target=start_cloudflared).start()
+          threading.Thread(target=telegram_listener, daemon=True).start()
+          watchdog()
+          '@
+
+          [System.IO.File]::WriteAllText("$PWD\orchestrator.py", $pythonScript, [System.Text.Encoding]::UTF8)
+          python orchestrator.py
