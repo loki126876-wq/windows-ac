@@ -1,0 +1,64 @@
+name: Windows Web Desktop (High-Speed Turbo)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  launch-windows:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: 1. Optimize Windows Performance & Graphics
+        shell: powershell
+        run: |
+          Write-Host "Optimizing Performance & Graphics..." -ForegroundColor Cyan
+
+          # تنظیم رزولوشن بهینه برای سرعت بالا
+          Set-DisplayResolution -Width 1280 -Height 720 -Force -ErrorAction SilentlyContinue
+
+          # خاموش کردن تمام افکت‌های انیمیشنی، شفافیت و سایه‌ها در ویندوز
+          Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name 'UserPreferencesMask' -Value ([byte[]](0x90,0x12,0x03,0x80,0x10,0x00,0x00,0x00))
+          Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop\WindowMetrics' -Name 'MinAnimate' -Value 0
+          Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' -Name 'VisualFXSetting' -Value 2
+
+          # تنظیمات برق
+          powercfg /s 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+
+          # نصب و کانفیگ TightVNC با بالاترین سرعت
+          choco install tightvnc -y --no-progress
+          Stop-Service tvnserver -ErrorAction SilentlyContinue
+
+          $vncPaths = @("HKLM:\SOFTWARE\TightVNC\Server", "HKCU:\Software\TightVNC\Server")
+          foreach ($path in $vncPaths) {
+              if (-not (Test-Path $path)) { New-Item -Path $path -Force | Out-Null }
+              Set-ItemProperty -Path $path -Name "AcceptRfbConnections" -Value 1 -Type DWord
+              Set-ItemProperty -Path $path -Name "AllowLoopback" -Value 1 -Type DWord
+              Set-ItemProperty -Path $path -Name "LoopbackOnly" -Value 0 -Type DWord
+              Set-ItemProperty -Path $path -Name "UseVncAuthentication" -Value 0 -Type DWord
+              Set-ItemProperty -Path $path -Name "AlwaysShared" -Value 1 -Type DWord
+              Set-ItemProperty -Path $path -Name "DisconnectAction" -Value 0 -Type DWord
+              Set-ItemProperty -Path $path -Name "RemoveWallpaper" -Value 1 -Type DWord
+              Set-ItemProperty -Path $path -Name "PollFullScreen" -Value 1 -Type DWord
+          }
+
+          Start-Service tvnserver
+
+          # نصب noVNC و websockify
+          git clone --depth 1 https://github.com/novnc/noVNC.git C:\noVNC
+          pip install websockify
+
+          # دانلود Cloudflared
+          Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe"
+
+      - name: 2. Start Web Bridge & Tunnel
+        shell: powershell
+        run: |
+          Start-Process powershell -ArgumentList "-WindowStyle Hidden -Command `"`$ErrorActionPreference = 'SilentlyContinue'; while (`$true) { python -m websockify --web C:\noVNC --heartbeat 15 8080 127.0.0.1:5900; Start-Sleep -Seconds 1 }`""
+          Start-Sleep -Seconds 3
+
+          Write-Host "==========================================================" -ForegroundColor Green
+          Write-Host "Turbo Web Desktop Ready!" -ForegroundColor Yellow
+          Write-Host "==========================================================" -ForegroundColor Green
+
+          .\cloudflared.exe tunnel --url http://127.0.0.1:8080 --no-autoupdate
