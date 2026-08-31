@@ -1,0 +1,66 @@
+name: Windows Web Desktop (Cloudflare)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  launch-windows:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: 1. Optimize Windows OS & Setup VNC Server
+        shell: powershell
+        run: |
+          Write-Host "Configuring Windows Environment..." -ForegroundColor Cyan
+
+          # تنظیمات برق و جلوگیری از قفل یا به خواب رفتن سیستم
+          powercfg /change standby-timeout-ac 0
+          powercfg /change monitor-timeout-ac 0
+          powercfg /change hibernate-timeout-ac 0
+          powercfg /s 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+
+          # نصب TightVNC
+          choco install tightvnc -y --no-progress
+          Stop-Service tvnserver -ErrorAction SilentlyContinue
+
+          # تنظیمات رجیستری برای نشست پایدار و چندگانه (Persistent Multi-Client Session)
+          $vncPaths = @("HKLM:\SOFTWARE\TightVNC\Server", "HKCU:\Software\TightVNC\Server")
+          foreach ($path in $vncPaths) {
+              if (-not (Test-Path $path)) { New-Item -Path $path -Force | Out-Null }
+              Set-ItemProperty -Path $path -Name "AcceptRfbConnections" -Value 1 -Type DWord
+              Set-ItemProperty -Path $path -Name "AllowLoopback" -Value 1 -Type DWord
+              Set-ItemProperty -Path $path -Name "LoopbackOnly" -Value 0 -Type DWord
+              Set-ItemProperty -Path $path -Name "UseVncAuthentication" -Value 0 -Type DWord
+              Set-ItemProperty -Path $path -Name "UseControlAuthentication" -Value 0 -Type DWord
+              Set-ItemProperty -Path $path -Name "AlwaysShared" -Value 1 -Type DWord
+              Set-ItemProperty -Path $path -Name "NeverShared" -Value 0 -Type DWord
+              Set-ItemProperty -Path $path -Name "DisconnectAction" -Value 0 -Type DWord
+              Set-ItemProperty -Path $path -Name "RemoveWallpaper" -Value 0 -Type DWord
+          }
+
+          Start-Service tvnserver
+
+          # نصب noVNC و websockify
+          git clone --depth 1 https://github.com/novnc/noVNC.git C:\noVNC
+          pip install websockify
+
+          # دانلود Cloudflared
+          Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe"
+
+      - name: 2. Start Robust Web Bridge & Cloudflare Tunnel
+        shell: powershell
+        run: |
+          Write-Host "Starting Resilient Web Bridge..." -ForegroundColor Cyan
+
+          # اجرای حلقه خودکار وب‌ساکیفای مجهز به Heartbeat برای جلوگیری از قطعی تانل
+          Start-Process powershell -ArgumentList "-WindowStyle Hidden -Command `"`$ErrorActionPreference = 'SilentlyContinue'; while (`$true) { python -m websockify --web C:\noVNC --heartbeat 15 8080 127.0.0.1:5900; Start-Sleep -Seconds 1 }`""
+
+          Start-Sleep -Seconds 3
+
+          Write-Host "==========================================================" -ForegroundColor Green
+          Write-Host "Server is fully isolated and ready." -ForegroundColor Yellow
+          Write-Host "Look for the trycloudflare URL below." -ForegroundColor Yellow
+          Write-Host "==========================================================" -ForegroundColor Green
+
+          .\cloudflared.exe tunnel --url http://127.0.0.1:8080 --no-autoupdate
