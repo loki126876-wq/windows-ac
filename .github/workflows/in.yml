@@ -1,0 +1,64 @@
+name: Windows Web Desktop (Rock-Solid + Telegram)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  launch-windows:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: 1. Setup VNC & Dependencies
+        shell: powershell
+        run: |
+          Write-Host "Configuring Windows Environment..." -ForegroundColor Cyan
+
+          # تنظیمات بهینه‌سازی سرعت و برق
+          Set-DisplayResolution -Width 1280 -Height 720 -Force -ErrorAction SilentlyContinue
+          powercfg /s 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+
+          # خاموش کردن افکت‌های سنگین ویندوز
+          Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name 'UserPreferencesMask' -Value ([byte[]](0x90,0x12,0x03,0x80,0x10,0x00,0x00,0x00))
+          Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop\WindowMetrics' -Name 'MinAnimate' -Value 0
+
+          # نصب و پیکربندی TightVNC
+          choco install tightvnc -y --no-progress
+          Stop-Service tvnserver -ErrorAction SilentlyContinue
+
+          $vncPaths = @("HKLM:\SOFTWARE\TightVNC\Server", "HKCU:\Software\TightVNC\Server")
+          foreach ($path in $vncPaths) {
+              if (-not (Test-Path $path)) { New-Item -Path $path -Force | Out-Null }
+              Set-ItemProperty -Path $path -Name "AcceptRfbConnections" -Value 1 -Type DWord
+              Set-ItemProperty -Path $path -Name "AllowLoopback" -Value 1 -Type DWord
+              Set-ItemProperty -Path $path -Name "LoopbackOnly" -Value 0 -Type DWord
+              Set-ItemProperty -Path $path -Name "UseVncAuthentication" -Value 0 -Type DWord
+              Set-ItemProperty -Path $path -Name "AlwaysShared" -Value 1 -Type DWord
+              Set-ItemProperty -Path $path -Name "DisconnectAction" -Value 0 -Type DWord
+              Set-ItemProperty -Path $path -Name "RemoveWallpaper" -Value 0 -Type DWord
+          }
+
+          Start-Service tvnserver
+
+          # نصب noVNC و websockify
+          git clone --depth 1 https://github.com/novnc/noVNC.git C:\noVNC
+          pip install websockify
+
+          # دانلود ابزار تانل کلودفلر
+          Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe"
+
+      - name: 2. Start Web Bridge & Launch Foreground Tunnel
+        shell: powershell
+        run: |
+          # 1. اجرای وب‌ساکیفای در پس‌زمینه
+          Start-Process powershell -ArgumentList "-WindowStyle Hidden", "-Command", "while(`$true){ python -m websockify --web C:\noVNC --heartbeat 15 8080 127.0.0.1:5900; Start-Sleep -Seconds 1 }"
+
+          # 2. اسکریپت ارسال لینک به تلگرام در پس‌زمینه (کاملاً ایزوله و بدون ایجاد وقفه)
+          Start-Process powershell -ArgumentList "-WindowStyle Hidden", "-Command", "`$bot='8608061868:AAHEEsZPOw8vq100WyyusF3QjTlBvTq9-Iw'; `$chat='7963634461'; for(`$i=0;`$i -lt 45;`$i++){ Start-Sleep -Seconds 1; if(Test-Path 'cf.log'){ `$txt = Get-Content 'cf.log' -Raw; if(`$txt -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com'){ `$url = `$matches[0] + '/vnc.html?autoconnect=true&reconnect=true&resize=scale'; `$body = @{ chat_id = `$chat; text = ('🚀 Windows Web Desktop Ready:`n`n🔗 Link:`n' + `$url) } | ConvertTo-Json; try { Invoke-RestMethod -Uri ('https://api.telegram.org/bot' + `$bot + '/sendMessage') -Method Post -ContentType 'application/json' -Body `$body -TimeoutSec 10 } catch {}; break } } }"
+
+          Write-Host "==========================================================" -ForegroundColor Green
+          Write-Host "Starting Rock-Solid Cloudflare Tunnel..." -ForegroundColor Yellow
+          Write-Host "==========================================================" -ForegroundColor Green
+
+          # 3. اجرای مستقیم و زنده تانل کلودفلر (بدون واسطه، دقیقاً مثل نسخه اولیه سالم)
+          .\cloudflared.exe tunnel --url http://127.0.0.1:8080 --logfile cf.log --no-autoupdate
