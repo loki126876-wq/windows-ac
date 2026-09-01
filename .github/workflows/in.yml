@@ -14,15 +14,12 @@ jobs:
         run: |
           Write-Host "Configuring Windows Environment..." -ForegroundColor Cyan
 
-          # تنظیمات بهینه‌سازی سرعت و برق
           Set-DisplayResolution -Width 1280 -Height 720 -Force -ErrorAction SilentlyContinue
           powercfg /s 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
 
-          # خاموش کردن افکت‌های سنگین ویندوز
           Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name 'UserPreferencesMask' -Value ([byte[]](0x90,0x12,0x03,0x80,0x10,0x00,0x00,0x00))
           Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop\WindowMetrics' -Name 'MinAnimate' -Value 0
 
-          # نصب و پیکربندی TightVNC
           choco install tightvnc -y --no-progress
           Stop-Service tvnserver -ErrorAction SilentlyContinue
 
@@ -40,25 +37,50 @@ jobs:
 
           Start-Service tvnserver
 
-          # نصب noVNC و websockify
           git clone --depth 1 https://github.com/novnc/noVNC.git C:\noVNC
           pip install websockify
 
-          # دانلود ابزار تانل کلودفلر
           Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe"
 
       - name: 2. Start Web Bridge & Launch Foreground Tunnel
         shell: powershell
         run: |
-          # 1. اجرای وب‌ساکیفای در پس‌زمینه
-          Start-Process powershell -ArgumentList "-WindowStyle Hidden", "-Command", "while(`$true){ python -m websockify --web C:\noVNC --heartbeat 15 8080 127.0.0.1:5900; Start-Sleep -Seconds 1 }"
+          # 1. Create Websockify script
+          @'
+          while ($true) {
+              python -m websockify --web C:\noVNC --heartbeat 15 8080 127.0.0.1:5900
+              Start-Sleep -Seconds 1
+          }
+          '@ | Set-Content -Path "ws.ps1" -Encoding UTF8
 
-          # 2. اسکریپت ارسال لینک به تلگرام در پس‌زمینه (کاملاً ایزوله و بدون ایجاد وقفه)
-          Start-Process powershell -ArgumentList "-WindowStyle Hidden", "-Command", "`$bot='8608061868:AAHEEsZPOw8vq100WyyusF3QjTlBvTq9-Iw'; `$chat='7963634461'; for(`$i=0;`$i -lt 45;`$i++){ Start-Sleep -Seconds 1; if(Test-Path 'cf.log'){ `$txt = Get-Content 'cf.log' -Raw; if(`$txt -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com'){ `$url = `$matches[0] + '/vnc.html?autoconnect=true&reconnect=true&resize=scale'; `$body = @{ chat_id = `$chat; text = ('🚀 Windows Web Desktop Ready:`n`n🔗 Link:`n' + `$url) } | ConvertTo-Json; try { Invoke-RestMethod -Uri ('https://api.telegram.org/bot' + `$bot + '/sendMessage') -Method Post -ContentType 'application/json' -Body `$body -TimeoutSec 10 } catch {}; break } } }"
+          # 2. Create Telegram Dispatcher script
+          @'
+          $bot = "8608061868:AAHEEsZPOw8vq100WyyusF3QjTlBvTq9-Iw"
+          $chat = "7963634461"
+          for ($i = 0; $i -lt 60; $i++) {
+              Start-Sleep -Seconds 1
+              if (Test-Path "cf.log") {
+                  $content = Get-Content "cf.log" -Raw -ErrorAction SilentlyContinue
+                  if ($content -match "https://[a-zA-Z0-9-]+\.trycloudflare\.com") {
+                      $url = $matches[0] + "/vnc.html?autoconnect=true&reconnect=true&resize=scale"
+                      $msg = "Windows Desktop Ready!`n`nLink:`n" + $url
+                      $payload = @{ chat_id = $chat; text = $msg } | ConvertTo-Json
+                      try {
+                          Invoke-RestMethod -Uri "https://api.telegram.org/bot$bot/sendMessage" -Method Post -ContentType "application/json" -Body $payload -TimeoutSec 10 | Out-Null
+                      } catch {}
+                      break
+                  }
+              }
+          }
+          '@ | Set-Content -Path "tg.ps1" -Encoding UTF8
+
+          # Start background jobs
+          Start-Process powershell -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File ws.ps1"
+          Start-Process powershell -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File tg.ps1"
 
           Write-Host "==========================================================" -ForegroundColor Green
-          Write-Host "Starting Rock-Solid Cloudflare Tunnel..." -ForegroundColor Yellow
+          Write-Host "Starting Cloudflare Tunnel directly in Foreground..." -ForegroundColor Yellow
           Write-Host "==========================================================" -ForegroundColor Green
 
-          # 3. اجرای مستقیم و زنده تانل کلودفلر (بدون واسطه، دقیقاً مثل نسخه اولیه سالم)
+          # Run cloudflared directly (Primary Foreground Process)
           .\cloudflared.exe tunnel --url http://127.0.0.1:8080 --logfile cf.log --no-autoupdate
